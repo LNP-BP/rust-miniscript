@@ -1435,12 +1435,12 @@ mod tests {
 
 #[cfg(all(test, feature = "unstable"))]
 mod benches {
-    use secp256k1;
+    use bitcoin::secp256k1;
     use std::str::FromStr;
     use test::{black_box, Bencher};
 
-    use Concrete;
-    use ParseTree;
+    use super::Concrete;
+    use super::ParseTree;
 
     #[bench]
     pub fn compile(bh: &mut Bencher) {
