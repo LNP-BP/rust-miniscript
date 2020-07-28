@@ -23,15 +23,16 @@
 //! these with BIP32 paths, pay-to-contract instructions, etc.
 //!
 
-use bitcoin::blockdata::{opcodes, script};
-use bitcoin::{self, Script};
-#[cfg(feature = "serde")]
-use serde::{de, ser};
 use std::fmt;
 use std::str::{self, FromStr};
 
+use bitcoin::blockdata::{opcodes, script};
+use bitcoin::{self, Script};
+
 use expression;
-use miniscript::Miniscript;
+use miniscript;
+use miniscript::context::ScriptContextError;
+use miniscript::{Legacy, Miniscript, Segwitv0};
 use Error;
 use MiniscriptKey;
 use Satisfier;
@@ -49,8 +50,8 @@ pub use self::satisfied_constraints::Stack;
 /// Script descriptor
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Descriptor<Pk: MiniscriptKey> {
-    /// A raw scriptpubkey (including pay-to-pubkey)
-    Bare(Miniscript<Pk>),
+    /// A raw scriptpubkey (including pay-to-pubkey) under Legacy context
+    Bare(Miniscript<Pk, Legacy>),
     /// Pay-to-Pubkey
     Pk(Pk),
     /// Pay-to-PubKey-Hash
@@ -59,16 +60,19 @@ pub enum Descriptor<Pk: MiniscriptKey> {
     Wpkh(Pk),
     /// Pay-to-Witness-PubKey-Hash inside P2SH
     ShWpkh(Pk),
-    /// Pay-to-ScriptHash
-    Sh(Miniscript<Pk>),
-    /// Pay-to-Witness-ScriptHash
-    Wsh(Miniscript<Pk>),
-    /// P2SH-P2WSH
-    ShWsh(Miniscript<Pk>),
+    /// Pay-to-ScriptHash with Legacy context
+    Sh(Miniscript<Pk, Legacy>),
+    /// Pay-to-Witness-ScriptHash with Segwitv0 context
+    Wsh(Miniscript<Pk, Segwitv0>),
+    /// P2SH-P2WSH with Segwitv0 context
+    ShWsh(Miniscript<Pk, Segwitv0>),
 }
 
 impl<Pk: MiniscriptKey> Descriptor<Pk> {
     /// Convert a descriptor using abstract keys to one using specific keys
+    /// This will panic if translatefpk returns an uncompressed key when
+    /// converting to a Segwit descriptor. To prevent this panic, ensure
+    /// translatefpk returns an error in this case instead.
     pub fn translate_pk<Fpk, Fpkh, Q, E>(
         &self,
         mut translatefpk: Fpk,
@@ -85,8 +89,18 @@ impl<Pk: MiniscriptKey> Descriptor<Pk> {
             )),
             Descriptor::Pk(ref pk) => translatefpk(pk).map(Descriptor::Pk),
             Descriptor::Pkh(ref pk) => translatefpk(pk).map(Descriptor::Pkh),
-            Descriptor::Wpkh(ref pk) => translatefpk(pk).map(Descriptor::Wpkh),
-            Descriptor::ShWpkh(ref pk) => translatefpk(pk).map(Descriptor::ShWpkh),
+            Descriptor::Wpkh(ref pk) => {
+                if pk.is_uncompressed() {
+                    panic!("Uncompressed pubkeys are not allowed in segwit v0 scripts");
+                }
+                translatefpk(pk).map(Descriptor::Wpkh)
+            }
+            Descriptor::ShWpkh(ref pk) => {
+                if pk.is_uncompressed() {
+                    panic!("Uncompressed pubkeys are not allowed in segwit v0 scripts");
+                }
+                translatefpk(pk).map(Descriptor::ShWpkh)
+            }
             Descriptor::Sh(ref ms) => Ok(Descriptor::Sh(
                 ms.translate_pk(&mut translatefpk, &mut translatefpkh)?,
             )),
@@ -200,7 +214,8 @@ impl<Pk: MiniscriptKey + ToPublicKey> Descriptor<Pk> {
                 let addr = bitcoin::Address::p2wpkh(&pk.to_public_key(), bitcoin::Network::Bitcoin);
                 addr.script_pubkey()
             }
-            Descriptor::Sh(ref d) | Descriptor::Wsh(ref d) | Descriptor::ShWsh(ref d) => d.encode(),
+            Descriptor::Sh(ref d) => d.encode(),
+            Descriptor::Wsh(ref d) | Descriptor::ShWsh(ref d) => d.encode(),
         }
     }
 
@@ -395,28 +410,57 @@ where
                 expression::terminal(&top.args[0], |pk| Pk::from_str(pk).map(Descriptor::Pkh))
             }
             ("wpkh", 1) => {
-                expression::terminal(&top.args[0], |pk| Pk::from_str(pk).map(Descriptor::Wpkh))
+                let wpkh = expression::terminal(&top.args[0], |pk| Pk::from_str(pk))?;
+                if wpkh.is_uncompressed() {
+                    Err(Error::ContextError(ScriptContextError::CompressedOnly))
+                } else {
+                    Ok(Descriptor::Wpkh(wpkh))
+                }
             }
             ("sh", 1) => {
                 let newtop = &top.args[0];
                 match (newtop.name, newtop.args.len()) {
                     ("wsh", 1) => {
                         let sub = Miniscript::from_tree(&newtop.args[0])?;
-                        Ok(Descriptor::ShWsh(sub))
+                        if sub.ty.corr.base != miniscript::types::Base::B {
+                            Err(Error::NonTopLevel(format!("{:?}", sub)))
+                        } else {
+                            Ok(Descriptor::ShWsh(sub))
+                        }
                     }
-                    ("wpkh", 1) => expression::terminal(&newtop.args[0], |pk| {
-                        Pk::from_str(pk).map(Descriptor::ShWpkh)
-                    }),
+                    ("wpkh", 1) => {
+                        let wpkh = expression::terminal(&newtop.args[0], |pk| Pk::from_str(pk))?;
+                        if wpkh.is_uncompressed() {
+                            Err(Error::ContextError(ScriptContextError::CompressedOnly))
+                        } else {
+                            Ok(Descriptor::ShWpkh(wpkh))
+                        }
+                    }
                     _ => {
                         let sub = Miniscript::from_tree(&top.args[0])?;
-                        Ok(Descriptor::Sh(sub))
+                        if sub.ty.corr.base != miniscript::types::Base::B {
+                            Err(Error::NonTopLevel(format!("{:?}", sub)))
+                        } else {
+                            Ok(Descriptor::Sh(sub))
+                        }
                     }
                 }
             }
-            ("wsh", 1) => expression::unary(top, Descriptor::Wsh),
+            ("wsh", 1) => {
+                let sub = Miniscript::from_tree(&top.args[0])?;
+                if sub.ty.corr.base != miniscript::types::Base::B {
+                    Err(Error::NonTopLevel(format!("{:?}", sub)))
+                } else {
+                    Ok(Descriptor::Wsh(sub))
+                }
+            }
             _ => {
-                let sub = expression::FromTree::from_tree(&top)?;
-                Ok(Descriptor::Bare(sub))
+                let sub = Miniscript::from_tree(&top)?;
+                if sub.ty.corr.base != miniscript::types::Base::B {
+                    Err(Error::NonTopLevel(format!("{:?}", sub)))
+                } else {
+                    Ok(Descriptor::Bare(sub))
+                }
             }
         }
     }
@@ -472,59 +516,7 @@ impl<Pk: MiniscriptKey> fmt::Display for Descriptor<Pk> {
     }
 }
 
-#[cfg(feature = "serde")]
-impl<Pk: MiniscriptKey> ser::Serialize for Descriptor<Pk> {
-    fn serialize<S: ser::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.collect_str(self)
-    }
-}
-
-#[cfg(feature = "serde")]
-impl<'de, Pk> de::Deserialize<'de> for Descriptor<Pk>
-where
-    Pk: MiniscriptKey,
-    <Pk as str::FromStr>::Err: ToString,
-    <<Pk as MiniscriptKey>::Hash as str::FromStr>::Err: ToString,
-{
-    fn deserialize<D: de::Deserializer<'de>>(d: D) -> Result<Descriptor<Pk>, D::Error> {
-        use std::marker::PhantomData;
-
-        struct StrVisitor<Qk>(PhantomData<(Qk)>);
-
-        impl<'de, Qk> de::Visitor<'de> for StrVisitor<Qk>
-        where
-            Qk: MiniscriptKey,
-            <Qk as str::FromStr>::Err: ToString,
-            <<Qk as MiniscriptKey>::Hash as str::FromStr>::Err: ToString,
-        {
-            type Value = Descriptor<Qk>;
-
-            fn expecting(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-                fmt.write_str("an ASCII miniscript string")
-            }
-
-            fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                if let Ok(s) = str::from_utf8(v) {
-                    Descriptor::from_str(s).map_err(E::custom)
-                } else {
-                    return Err(E::invalid_value(de::Unexpected::Bytes(v), &self));
-                }
-            }
-
-            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                Descriptor::from_str(v).map_err(E::custom)
-            }
-        }
-
-        d.deserialize_str(StrVisitor(PhantomData))
-    }
-}
+serde_string_impl_pk!(Descriptor, "a script descriptor");
 
 #[cfg(test)]
 mod tests {
@@ -535,23 +527,49 @@ mod tests {
     use bitcoin::hashes::{hash160, sha256};
     use bitcoin::{self, secp256k1, PublicKey};
     use miniscript::satisfy::BitcoinSig;
+    use std::collections::HashMap;
     use std::str::FromStr;
-    use Descriptor;
-    use Miniscript;
-    use Satisfier;
+    use {Descriptor, DummyKey, Miniscript, Satisfier};
 
     type StdDescriptor = Descriptor<PublicKey>;
     const TEST_PK: &'static str =
         "pk(020000000000000000000000000000000000000000000000000000000000000002)";
 
+    fn roundtrip_descriptor(s: &str) {
+        let desc = Descriptor::<DummyKey>::from_str(&s).unwrap();
+        let output = desc.to_string();
+        let normalize_aliases = s.replace("c:pk_k(", "pk(").replace("c:pk_h(", "pkh(");
+        assert_eq!(normalize_aliases, output);
+    }
+
+    #[test]
+    fn desc_rtt_tests() {
+        roundtrip_descriptor("c:pk_k()");
+        roundtrip_descriptor("wsh(pk())");
+        roundtrip_descriptor("wsh(c:pk_k())");
+        roundtrip_descriptor("c:pk_h()");
+    }
     #[test]
     fn parse_descriptor() {
         StdDescriptor::from_str("(").unwrap_err();
         StdDescriptor::from_str("(x()").unwrap_err();
         StdDescriptor::from_str("(\u{7f}()3").unwrap_err();
         StdDescriptor::from_str("pk()").unwrap_err();
+        StdDescriptor::from_str("nl:0").unwrap_err(); //issue 63
 
         StdDescriptor::from_str(TEST_PK).unwrap();
+
+        let uncompressed_pk =
+        "0414fc03b8df87cd7b872996810db8458d61da8448e531569c8517b469a119d267be5645686309c6e6736dbd93940707cc9143d3cf29f1b877ff340e2cb2d259cf";
+
+        // Context tests
+        StdDescriptor::from_str(&format!("pk({})", uncompressed_pk)).unwrap();
+        StdDescriptor::from_str(&format!("pkh({})", uncompressed_pk)).unwrap();
+        StdDescriptor::from_str(&format!("sh(pk({}))", uncompressed_pk)).unwrap();
+        StdDescriptor::from_str(&format!("wpkh({})", uncompressed_pk)).unwrap_err();
+        StdDescriptor::from_str(&format!("sh(wpkh({}))", uncompressed_pk)).unwrap_err();
+        StdDescriptor::from_str(&format!("wsh(pk{})", uncompressed_pk)).unwrap_err();
+        StdDescriptor::from_str(&format!("sh(wsh(pk{}))", uncompressed_pk)).unwrap_err();
     }
 
     #[test]
@@ -841,6 +859,8 @@ mod tests {
         );
         assert_eq!(sh.unsigned_script_sig(), bitcoin::Script::new());
 
+        let ms = ms_str!("c:pk_k({})", pk);
+
         let wsh = Descriptor::Wsh(ms.clone());
         wsh.satisfy(&mut txin, &satisfier).expect("satisfaction");
         assert_eq!(
@@ -895,5 +915,78 @@ mod tests {
         let check = actual_instructions.last().unwrap();
 
         assert_eq!(check, &Instruction::Op(OP_CSV))
+    }
+
+    #[test]
+    fn roundtrip_tests() {
+        let descriptor = Descriptor::<bitcoin::PublicKey>::from_str("multi");
+        assert_eq!(
+            descriptor.unwrap_err().to_string(),
+            "unexpected «no arguments given»"
+        )
+    }
+
+    #[test]
+    fn empty_thresh() {
+        let descriptor = Descriptor::<bitcoin::PublicKey>::from_str("thresh");
+        assert_eq!(
+            descriptor.unwrap_err().to_string(),
+            "unexpected «no arguments given»"
+        )
+    }
+
+    #[test]
+    fn witness_stack_for_andv_is_arranged_in_correct_order() {
+        // arrange
+        let a = bitcoin::PublicKey::from_str(
+            "02937402303919b3a2ee5edd5009f4236f069bf75667b8e6ecf8e5464e20116a0e",
+        )
+        .unwrap();
+        let sig_a = secp256k1::Signature::from_str("3045022100a7acc3719e9559a59d60d7b2837f9842df30e7edcd754e63227e6168cec72c5d022066c2feba4671c3d99ea75d9976b4da6c86968dbf3bab47b1061e7a1966b1778c").unwrap();
+
+        let b = bitcoin::PublicKey::from_str(
+            "02eb64639a17f7334bb5a1a3aad857d6fec65faef439db3de72f85c88bc2906ad3",
+        )
+        .unwrap();
+        let sig_b = secp256k1::Signature::from_str("3044022075b7b65a7e6cd386132c5883c9db15f9a849a0f32bc680e9986398879a57c276022056d94d12255a4424f51c700ac75122cb354895c9f2f88f0cbb47ba05c9c589ba").unwrap();
+
+        let descriptor = Descriptor::<bitcoin::PublicKey>::from_str(&format!(
+            "wsh(and_v(v:pk({A}),pk({B})))",
+            A = a,
+            B = b
+        ))
+        .unwrap();
+
+        let mut txin = bitcoin::TxIn {
+            previous_output: bitcoin::OutPoint::default(),
+            script_sig: bitcoin::Script::new(),
+            sequence: 0,
+            witness: vec![],
+        };
+        let satisfier = {
+            let mut satisfier = HashMap::with_capacity(2);
+
+            satisfier.insert(a, (sig_a.clone(), ::bitcoin::SigHashType::All));
+            satisfier.insert(b, (sig_b.clone(), ::bitcoin::SigHashType::All));
+
+            satisfier
+        };
+
+        // act
+        descriptor.satisfy(&mut txin, &satisfier).unwrap();
+
+        // assert
+        let witness0 = &txin.witness[0];
+        let witness1 = &txin.witness[1];
+
+        let sig0 = secp256k1::Signature::from_der(&witness0[..witness0.len() - 1]).unwrap();
+        let sig1 = secp256k1::Signature::from_der(&witness1[..witness1.len() - 1]).unwrap();
+
+        // why are we asserting this way?
+        // The witness stack is evaluated from top to bottom. Given an `and` instruction, the left arm of the and is going to evaluate first,
+        // meaning the next witness element (on a three element stack, that is the middle one) needs to be the signature for the left side of the `and`.
+        // The left side of the `and` performs a CHECKSIG against public key `a` so `sig1` needs to be `sig_a` and `sig0` needs to be `sig_b`.
+        assert_eq!(sig1, sig_a);
+        assert_eq!(sig0, sig_b);
     }
 }

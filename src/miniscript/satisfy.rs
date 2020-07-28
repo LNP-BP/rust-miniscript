@@ -25,6 +25,7 @@ use bitcoin::hashes::{hash160, ripemd160, sha256, sha256d};
 use bitcoin::{self, secp256k1};
 use {MiniscriptKey, ToPublicKey};
 
+use ScriptContext;
 use Terminal;
 
 /// Type alias for a signature/hashtype pair
@@ -510,8 +511,8 @@ impl Satisfaction {
     }
 
     /// Produce a satisfaction
-    pub fn satisfy<Pk: MiniscriptKey + ToPublicKey, Sat: Satisfier<Pk>>(
-        term: &Terminal<Pk>,
+    pub fn satisfy<Pk: MiniscriptKey + ToPublicKey, Ctx: ScriptContext, Sat: Satisfier<Pk>>(
+        term: &Terminal<Pk, Ctx>,
         stfr: &Sat,
     ) -> Self {
         match *term {
@@ -580,7 +581,7 @@ impl Satisfaction {
                 let l_sat = Self::satisfy(&l.node, stfr);
                 let r_sat = Self::satisfy(&r.node, stfr);
                 Satisfaction {
-                    stack: Witness::combine(l_sat.stack, r_sat.stack),
+                    stack: Witness::combine(r_sat.stack, l_sat.stack),
                     has_sig: l_sat.has_sig || r_sat.has_sig,
                 }
             }
@@ -592,11 +593,11 @@ impl Satisfaction {
 
                 Self::minimum(
                     Satisfaction {
-                        stack: Witness::combine(a_sat.stack, b_sat.stack),
+                        stack: Witness::combine(b_sat.stack, a_sat.stack),
                         has_sig: a_sat.has_sig || b_sat.has_sig,
                     },
                     Satisfaction {
-                        stack: Witness::combine(a_nsat.stack, c_sat.stack),
+                        stack: Witness::combine(c_sat.stack, a_nsat.stack),
                         has_sig: a_nsat.has_sig || c_sat.has_sig,
                     },
                 )
@@ -750,8 +751,8 @@ impl Satisfaction {
     }
 
     /// Produce a satisfaction
-    fn dissatisfy<Pk: MiniscriptKey + ToPublicKey, Sat: Satisfier<Pk>>(
-        term: &Terminal<Pk>,
+    fn dissatisfy<Pk: MiniscriptKey + ToPublicKey, Ctx: ScriptContext, Sat: Satisfier<Pk>>(
+        term: &Terminal<Pk, Ctx>,
         stfr: &Sat,
     ) -> Self {
         match *term {

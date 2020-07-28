@@ -80,6 +80,7 @@
 //! ```
 //!
 //!
+#![allow(bare_trait_objects)]
 #![cfg_attr(all(test, feature = "unstable"), feature(test))]
 pub extern crate bitcoin;
 #[cfg(feature = "serde")]
@@ -88,7 +89,6 @@ pub extern crate serde;
 extern crate test;
 
 #[macro_use]
-#[cfg(test)]
 mod macros;
 
 pub mod descriptor;
@@ -104,6 +104,7 @@ use bitcoin::blockdata::{opcodes, script};
 use bitcoin::hashes::{hash160, sha256, Hash};
 
 pub use descriptor::{Descriptor, SatisfiedConstraints};
+pub use miniscript::context::{Legacy, ScriptContext, Segwitv0};
 pub use miniscript::decode::Terminal;
 pub use miniscript::satisfy::{BitcoinSig, Satisfier};
 pub use miniscript::Miniscript;
@@ -112,6 +113,12 @@ pub use miniscript::Miniscript;
 pub trait MiniscriptKey:
     Clone + Eq + Ord + str::FromStr + fmt::Debug + fmt::Display + hash::Hash
 {
+    /// Check if the publicKey is uncompressed. The default
+    /// implementation returns false
+    fn is_uncompressed(&self) -> bool {
+        false
+    }
+    /// The associated Hash type with the publicKey
     type Hash: Clone + Eq + Ord + str::FromStr + fmt::Display + fmt::Debug + hash::Hash;
 
     ///Converts an object to PublicHash
@@ -119,6 +126,12 @@ pub trait MiniscriptKey:
 }
 
 impl MiniscriptKey for bitcoin::PublicKey {
+    /// `is_uncompressed` returns true only for
+    /// bitcoin::Publickey type if the underlying key is uncompressed.
+    fn is_uncompressed(&self) -> bool {
+        !self.compressed
+    }
+
     type Hash = hash160::Hash;
 
     fn to_pubkeyhash(&self) -> Self::Hash {
@@ -309,8 +322,12 @@ pub enum Error {
     #[cfg(feature = "compiler")]
     ///Compiler related errors
     CompilerError(policy::compiler::CompilerError),
+    ///Errors related to policy
+    PolicyError(policy::concrete::PolicyError),
     ///Interpreter related errors
     InterpreterError(descriptor::InterpreterError),
+    /// Forward script context related errors
+    ContextError(miniscript::context::ScriptContextError),
     /// Bad Script Sig. As per standardness rules, only pushes are allowed in
     /// scriptSig. This error is invoked when op_codes are pushed onto the stack
     /// As per the current implementation, pushing an integer apart from 0 or 1
@@ -333,15 +350,27 @@ pub enum Error {
     UnexpectedPubkeyHash,
     /// Pubkey processor failure
     PubkeyProcessorFailure,
+    /// Recursion depth exceeded when parsing policy/miniscript from string
+    MaxRecursiveDepthExceeded,
+    /// Script size too large
+    ScriptSizeTooLarge,
 }
 
 #[doc(hidden)]
-impl<Pk> From<miniscript::types::Error<Pk>> for Error
+impl<Pk, Ctx> From<miniscript::types::Error<Pk, Ctx>> for Error
 where
     Pk: MiniscriptKey,
+    Ctx: ScriptContext,
 {
-    fn from(e: miniscript::types::Error<Pk>) -> Error {
+    fn from(e: miniscript::types::Error<Pk, Ctx>) -> Error {
         Error::TypeCheck(e.to_string())
+    }
+}
+
+#[doc(hidden)]
+impl From<miniscript::context::ScriptContextError> for Error {
+    fn from(e: miniscript::context::ScriptContextError) -> Error {
+        Error::ContextError(e)
     }
 }
 
@@ -362,6 +391,11 @@ impl error::Error for Error {
         ""
     }
 }
+
+// https://github.com/sipa/miniscript/pull/5 for discussion on this number
+const MAX_RECURSION_DEPTH: u32 = 402;
+// https://github.com/bitcoin/bips/blob/master/bip-0141.mediawiki
+const MAX_SCRIPT_SIZE: u32 = 10000;
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -403,8 +437,10 @@ impl fmt::Display for Error {
             Error::BadDescriptor => f.write_str("could not create a descriptor"),
             Error::Secp(ref e) => fmt::Display::fmt(e, f),
             Error::InterpreterError(ref e) => fmt::Display::fmt(e, f),
+            Error::ContextError(ref e) => fmt::Display::fmt(e, f),
             #[cfg(feature = "compiler")]
             Error::CompilerError(ref e) => fmt::Display::fmt(e, f),
+            Error::PolicyError(ref e) => fmt::Display::fmt(e, f),
             Error::BadScriptSig => f.write_str("Script sig must only consist of pushes"),
             Error::NonEmptyWitness => f.write_str("Non empty witness for Pk/Pkh"),
             Error::NonEmptyScriptSig => f.write_str("Non empty script sig for segwit spend"),
@@ -420,6 +456,16 @@ impl fmt::Display for Error {
             Error::PubkeyProcessorFailure => {
                 f.write_str("Internal fialure of the public key processor")
             }
+            Error::MaxRecursiveDepthExceeded => write!(
+                f,
+                "Recusive depth over {} not permitted",
+                MAX_RECURSION_DEPTH
+            ),
+            Error::ScriptSizeTooLarge => write!(
+                f,
+                "Standardness rules imply bitcoin than {} bytes",
+                MAX_SCRIPT_SIZE
+            ),
         }
     }
 }
@@ -436,6 +482,13 @@ impl From<psbt::Error> for Error {
 impl From<policy::compiler::CompilerError> for Error {
     fn from(e: policy::compiler::CompilerError) -> Error {
         Error::CompilerError(e)
+    }
+}
+
+#[doc(hidden)]
+impl From<policy::concrete::PolicyError> for Error {
+    fn from(e: policy::concrete::PolicyError) -> Error {
+        Error::PolicyError(e)
     }
 }
 

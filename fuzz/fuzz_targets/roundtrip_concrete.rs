@@ -1,8 +1,8 @@
-
 extern crate miniscript;
-
-use std::str::FromStr;
+extern crate regex;
 use miniscript::{policy, DummyKey};
+use regex::Regex;
+use std::str::FromStr;
 
 type DummyPolicy = policy::Concrete<DummyKey>;
 
@@ -10,7 +10,11 @@ fn do_test(data: &[u8]) {
     let data_str = String::from_utf8_lossy(data);
     if let Ok(pol) = DummyPolicy::from_str(&data_str) {
         let output = pol.to_string();
-        assert_eq!(data_str, output);
+        //remove all instances of 1@
+        let re = Regex::new("(\\D)1@").unwrap();
+        let output = re.replace_all(&output, "$1");
+        let data_str = re.replace_all(&data_str, "$1");
+        assert_eq!(data_str.to_lowercase(), output.to_lowercase());
     }
 }
 
@@ -24,7 +28,8 @@ fn main() {
 }
 
 #[cfg(feature = "honggfuzz")]
-#[macro_use] extern crate honggfuzz;
+#[macro_use]
+extern crate honggfuzz;
 #[cfg(feature = "honggfuzz")]
 fn main() {
     loop {

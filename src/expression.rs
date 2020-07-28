@@ -20,6 +20,8 @@ use std::str::FromStr;
 use errstr;
 use Error;
 
+use MAX_RECURSION_DEPTH;
+
 #[derive(Debug)]
 /// A token of the form `x(...)` or `x`
 pub struct Tree<'a> {
@@ -34,7 +36,14 @@ pub trait FromTree: Sized {
 }
 
 impl<'a> Tree<'a> {
-    fn from_slice(mut sl: &'a str) -> Result<(Tree<'a>, &'a str), Error> {
+    fn from_slice(sl: &'a str) -> Result<(Tree<'a>, &'a str), Error> {
+        Self::from_slice_helper(sl, 0u32)
+    }
+
+    fn from_slice_helper(mut sl: &'a str, depth: u32) -> Result<(Tree<'a>, &'a str), Error> {
+        if depth >= MAX_RECURSION_DEPTH {
+            return Err(Error::MaxRecursiveDepthExceeded);
+        }
         enum Found {
             Nothing,
             Lparen(usize),
@@ -87,7 +96,7 @@ impl<'a> Tree<'a> {
 
                 sl = &sl[n + 1..];
                 loop {
-                    let (arg, new_sl) = Tree::from_slice(sl)?;
+                    let (arg, new_sl) = Tree::from_slice_helper(sl, depth + 1)?;
                     ret.args.push(arg);
 
                     if new_sl.is_empty() {
@@ -127,6 +136,14 @@ impl<'a> Tree<'a> {
 
 /// Parse a string as a u32, for timelocks or thresholds
 pub fn parse_num(s: &str) -> Result<u32, Error> {
+    if s.len() > 1 {
+        let ch = s.chars().next().unwrap();
+        if ch < '1' || ch > '9' {
+            return Err(Error::Unexpected(
+                "Number must start with a digit 1-9".to_string(),
+            ));
+        }
+    }
     u32::from_str(s).map_err(|_| errstr(s))
 }
 
@@ -170,5 +187,21 @@ where
         Ok(convert(left, right))
     } else {
         Err(errstr(term.name))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    use super::parse_num;
+
+    #[test]
+    fn test_parse_num() {
+        assert!(parse_num("0").is_ok());
+        assert!(parse_num("00").is_err());
+        assert!(parse_num("0000").is_err());
+        assert!(parse_num("06").is_err());
+        assert!(parse_num("+6").is_err());
+        assert!(parse_num("-6").is_err());
     }
 }

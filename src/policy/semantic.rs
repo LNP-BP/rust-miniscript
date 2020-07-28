@@ -14,12 +14,14 @@
 
 //! Abstract Policies
 
-use bitcoin::hashes::hex::FromHex;
-use bitcoin::hashes::{hash160, ripemd160, sha256, sha256d};
+use std::str::FromStr;
 use std::{fmt, str};
 
+use bitcoin::hashes::hex::FromHex;
+use bitcoin::hashes::{hash160, ripemd160, sha256, sha256d};
+
+use super::concrete::PolicyError;
 use errstr;
-use std::str::FromStr;
 use Error;
 use {expression, MiniscriptKey};
 
@@ -37,9 +39,9 @@ pub enum Policy<Pk: MiniscriptKey> {
     Trivial,
     /// Signature and public key matching a given hash is required
     KeyHash(Pk::Hash),
-    /// A relative locktime restriction
-    After(u32),
     /// An absolute locktime restriction
+    After(u32),
+    /// A relative locktime restriction
     Older(u32),
     /// A SHA256 whose preimage must be provided to satisfy the descriptor
     Sha256(sha256::Hash),
@@ -202,6 +204,8 @@ where
     }
 }
 
+serde_string_impl_pk!(Policy, "a miniscript semantic policy");
+
 impl<Pk> expression::FromTree for Policy<Pk>
 where
     Pk: MiniscriptKey,
@@ -234,8 +238,8 @@ where
                 hash160::Hash::from_hex(x).map(Policy::Hash160)
             }),
             ("and", _) => {
-                if top.args.is_empty() {
-                    return Err(errstr("and without args"));
+                if top.args.len() != 2 {
+                    return Err(Error::PolicyError(PolicyError::NonBinaryArgAnd));
                 }
                 let mut subs = Vec::with_capacity(top.args.len());
                 for arg in &top.args {
@@ -244,8 +248,8 @@ where
                 Ok(Policy::And(subs))
             }
             ("or", _) => {
-                if top.args.is_empty() {
-                    return Err(errstr("or without args"));
+                if top.args.len() != 2 {
+                    return Err(Error::PolicyError(PolicyError::NonBinaryArgOr));
                 }
                 let mut subs = Vec::with_capacity(top.args.len());
                 for arg in &top.args {
@@ -254,6 +258,9 @@ where
                 Ok(Policy::Or(subs))
             }
             ("thresh", nsubs) => {
+                if nsubs == 0 {
+                    return Err(errstr("thresh without args"));
+                }
                 if !top.args[0].args.is_empty() {
                     return Err(errstr(top.args[0].args[0].name));
                 }

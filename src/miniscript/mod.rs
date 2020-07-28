@@ -12,7 +12,7 @@
 // If not, see <http://creativecommons.org/publicdomain/zero/1.0/>.
 //
 
-//! # AST Tree
+//! # Abstract Syntax Tree
 //!
 //! Defines a variety of data structures for describing Miniscript, a subset of
 //! Bitcoin Script which can be efficiently parsed and serialized from Script,
@@ -21,17 +21,20 @@
 //! Users of the library in general will only need to use the structures exposed
 //! from the top level of this module; however for people wanting to do advanced
 //! things, the submodules are public as well which provide visibility into the
-//! components of the AST trees.
+//! components of the AST.
 //!
 
-#[cfg(feature = "serde")]
-use serde::{de, ser};
+use std::marker::PhantomData;
 use std::{fmt, str};
 
 use bitcoin;
 use bitcoin::blockdata::script;
 
+pub use self::context::Legacy;
+pub use self::context::Segwitv0;
+
 pub mod astelem;
+pub(crate) mod context;
 pub mod decode;
 pub mod iter;
 pub mod lex;
@@ -40,8 +43,11 @@ pub mod types;
 
 use self::lex::{lex, TokenIter};
 use self::types::Property;
+pub use miniscript::context::ScriptContext;
+use miniscript::decode::Terminal;
 use miniscript::types::extra_props::ExtData;
 use miniscript::types::Type;
+
 use std::cmp;
 use std::sync::Arc;
 use MiniscriptKey;
@@ -49,90 +55,98 @@ use {expression, Error, ToPublicKey};
 
 /// Top-level script AST type
 #[derive(Clone, Hash)]
-pub struct Miniscript<Pk: MiniscriptKey> {
+pub struct Miniscript<Pk: MiniscriptKey, Ctx: ScriptContext> {
     ///A node in the Abstract Syntax Tree(
-    pub node: decode::Terminal<Pk>,
+    pub node: Terminal<Pk, Ctx>,
     ///The correctness and malleability type information for the AST node
     pub ty: types::Type,
     ///Additional information helpful for extra analysis.
     pub ext: types::extra_props::ExtData,
+    /// Context PhantomData. Only accessible inside this crate
+    pub(crate) phantom: PhantomData<Ctx>,
 }
 
 /// `PartialOrd` of `Miniscript` must depend only on node and not the type information.
 /// The type information and extra_properties can be deterministically determined
-/// by the ast tree.
-impl<Pk: MiniscriptKey> PartialOrd for Miniscript<Pk> {
-    fn partial_cmp(&self, other: &Miniscript<Pk>) -> Option<cmp::Ordering> {
+/// by the ast.
+impl<Pk: MiniscriptKey, Ctx: ScriptContext> PartialOrd for Miniscript<Pk, Ctx> {
+    fn partial_cmp(&self, other: &Miniscript<Pk, Ctx>) -> Option<cmp::Ordering> {
         Some(self.node.cmp(&other.node))
     }
 }
 
 /// `Ord` of `Miniscript` must depend only on node and not the type information.
 /// The type information and extra_properties can be deterministically determined
-/// by the ast tree.
-impl<Pk: MiniscriptKey> Ord for Miniscript<Pk> {
-    fn cmp(&self, other: &Miniscript<Pk>) -> cmp::Ordering {
+/// by the ast.
+impl<Pk: MiniscriptKey, Ctx: ScriptContext> Ord for Miniscript<Pk, Ctx> {
+    fn cmp(&self, other: &Miniscript<Pk, Ctx>) -> cmp::Ordering {
         self.node.cmp(&other.node)
     }
 }
 
 /// `PartialEq` of `Miniscript` must depend only on node and not the type information.
 /// The type information and extra_properties can be deterministically determined
-/// by the ast tree.
-impl<Pk: MiniscriptKey> PartialEq for Miniscript<Pk> {
-    fn eq(&self, other: &Miniscript<Pk>) -> bool {
+/// by the ast.
+impl<Pk: MiniscriptKey, Ctx: ScriptContext> PartialEq for Miniscript<Pk, Ctx> {
+    fn eq(&self, other: &Miniscript<Pk, Ctx>) -> bool {
         self.node.eq(&other.node)
     }
 }
 
 /// `Eq` of `Miniscript` must depend only on node and not the type information.
 /// The type information and extra_properties can be deterministically determined
-/// by the ast tree.
-impl<Pk: MiniscriptKey> Eq for Miniscript<Pk> {}
+/// by the ast.
+impl<Pk: MiniscriptKey, Ctx: ScriptContext> Eq for Miniscript<Pk, Ctx> {}
 
-impl<Pk: MiniscriptKey> fmt::Debug for Miniscript<Pk> {
+impl<Pk: MiniscriptKey, Ctx: ScriptContext> fmt::Debug for Miniscript<Pk, Ctx> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{:?}", self.node)
     }
 }
 
-impl<Pk: MiniscriptKey> Miniscript<Pk> {
+impl<Pk: MiniscriptKey, Ctx: ScriptContext> Miniscript<Pk, Ctx> {
     /// Add type information(Type and Extdata) to Miniscript based on
     /// `AstElem` fragment. Dependent on display and clone because of Error
     /// Display code of type_check.
-    pub fn from_ast(t: decode::Terminal<Pk>) -> Result<Miniscript<Pk>, Error> {
+    pub fn from_ast(t: Terminal<Pk, Ctx>) -> Result<Miniscript<Pk, Ctx>, Error> {
         Ok(Miniscript {
             ty: Type::type_check(&t, |_| None)?,
             ext: ExtData::type_check(&t, |_| None)?,
             node: t,
+            phantom: PhantomData,
         })
     }
 }
 
-impl<Pk: MiniscriptKey> fmt::Display for Miniscript<Pk> {
+impl<Pk: MiniscriptKey, Ctx: ScriptContext> fmt::Display for Miniscript<Pk, Ctx> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", self.node)
     }
 }
 
-impl<Pk: MiniscriptKey> Miniscript<Pk> {
+impl<Pk: MiniscriptKey, Ctx: ScriptContext> Miniscript<Pk, Ctx> {
     /// Extracts the `AstElem` representing the root of the miniscript
-    pub fn into_inner(self) -> decode::Terminal<Pk> {
+    pub fn into_inner(self) -> Terminal<Pk, Ctx> {
         self.node
     }
 
-    pub fn as_inner(&self) -> &decode::Terminal<Pk> {
+    pub fn as_inner(&self) -> &Terminal<Pk, Ctx> {
         &self.node
     }
 }
 
-impl Miniscript<bitcoin::PublicKey> {
+impl<Ctx: ScriptContext> Miniscript<bitcoin::PublicKey, Ctx> {
     /// Attempt to parse a script into a Miniscript representation
-    pub fn parse(script: &script::Script) -> Result<Miniscript<bitcoin::PublicKey>, Error> {
+    pub fn parse(script: &script::Script) -> Result<Miniscript<bitcoin::PublicKey, Ctx>, Error> {
+        // Transactions more than 100Kb are non-standard
+        if script.len() > 100_000 {
+            return Err(Error::ScriptSizeTooLarge);
+        }
         let tokens = lex(script)?;
         let mut iter = TokenIter::new(tokens);
 
         let top = decode::parse(&mut iter)?;
+        Ctx::check_frag_validity(&top.node)?;
         let type_check = types::Type::type_check(&top.node, |_| None)?;
         if type_check.corr.base != types::Base::B {
             return Err(Error::NonTopLevel(format!("{:?}", top)));
@@ -145,7 +159,7 @@ impl Miniscript<bitcoin::PublicKey> {
     }
 }
 
-impl<Pk: MiniscriptKey + ToPublicKey> Miniscript<Pk> {
+impl<Pk: MiniscriptKey + ToPublicKey, Ctx: ScriptContext> Miniscript<Pk, Ctx> {
     /// Encode as a Bitcoin script
     pub fn encode(&self) -> script::Script {
         self.node.encode(script::Builder::new()).into_script()
@@ -195,15 +209,18 @@ impl<Pk: MiniscriptKey + ToPublicKey> Miniscript<Pk> {
     }
 }
 
-impl<Pk: MiniscriptKey> Miniscript<Pk> {
-    pub fn translate_pk<FPk, FPkh, Q, Error>(
+impl<Pk: MiniscriptKey, Ctx: ScriptContext> Miniscript<Pk, Ctx> {
+    /// This will panic if translatefpk returns an uncompressed key when
+    /// converting to a Segwit descriptor. To prevent this panic, ensure
+    /// translatefpk returns an error in this case instead.
+    pub fn translate_pk<FPk, FPkh, Q, FuncError>(
         &self,
         translatefpk: &mut FPk,
         translatefpkh: &mut FPkh,
-    ) -> Result<Miniscript<Q>, Error>
+    ) -> Result<Miniscript<Q, Ctx>, FuncError>
     where
-        FPk: FnMut(&Pk) -> Result<Q, Error>,
-        FPkh: FnMut(&Pk::Hash) -> Result<Q::Hash, Error>,
+        FPk: FnMut(&Pk) -> Result<Q, FuncError>,
+        FPkh: FnMut(&Pk::Hash) -> Result<Q::Hash, FuncError>,
         Q: MiniscriptKey,
     {
         let inner = self.node.translate_pk(translatefpk, translatefpkh)?;
@@ -213,11 +230,12 @@ impl<Pk: MiniscriptKey> Miniscript<Pk> {
             ty: self.ty,
             ext: self.ext,
             node: inner,
+            phantom: PhantomData,
         })
     }
 }
 
-impl<Pk: MiniscriptKey + ToPublicKey> Miniscript<Pk> {
+impl<Pk: MiniscriptKey + ToPublicKey, Ctx: ScriptContext> Miniscript<Pk, Ctx> {
     /// Attempt to produce a satisfying witness for the
     /// witness script represented by the parse tree
     pub fn satisfy<S: satisfy::Satisfier<Pk>>(&self, satisfier: S) -> Option<Vec<Vec<u8>>> {
@@ -228,44 +246,48 @@ impl<Pk: MiniscriptKey + ToPublicKey> Miniscript<Pk> {
     }
 }
 
-impl<Pk> expression::FromTree for Arc<Miniscript<Pk>>
+impl<Pk, Ctx> expression::FromTree for Arc<Miniscript<Pk, Ctx>>
 where
     Pk: MiniscriptKey,
+    Ctx: ScriptContext,
     <Pk as str::FromStr>::Err: ToString,
     <<Pk as MiniscriptKey>::Hash as str::FromStr>::Err: ToString,
 {
-    fn from_tree(top: &expression::Tree) -> Result<Arc<Miniscript<Pk>>, Error> {
+    fn from_tree(top: &expression::Tree) -> Result<Arc<Miniscript<Pk, Ctx>>, Error> {
         Ok(Arc::new(expression::FromTree::from_tree(top)?))
     }
 }
 
-impl<Pk> expression::FromTree for Miniscript<Pk>
+impl<Pk, Ctx> expression::FromTree for Miniscript<Pk, Ctx>
 where
     Pk: MiniscriptKey,
+    Ctx: ScriptContext,
     <Pk as str::FromStr>::Err: ToString,
     <<Pk as MiniscriptKey>::Hash as str::FromStr>::Err: ToString,
 {
     /// Parse an expression tree into a Miniscript. As a general rule, this
     /// should not be called directly; rather go through the descriptor API.
-    fn from_tree(top: &expression::Tree) -> Result<Miniscript<Pk>, Error> {
-        let inner: decode::Terminal<Pk> = expression::FromTree::from_tree(top)?;
+    fn from_tree(top: &expression::Tree) -> Result<Miniscript<Pk, Ctx>, Error> {
+        let inner: Terminal<Pk, Ctx> = expression::FromTree::from_tree(top)?;
         Ok(Miniscript {
             ty: Type::type_check(&inner, |_| None)?,
             ext: ExtData::type_check(&inner, |_| None)?,
             node: inner,
+            phantom: PhantomData,
         })
     }
 }
 
-impl<Pk> str::FromStr for Miniscript<Pk>
+impl<Pk, Ctx> str::FromStr for Miniscript<Pk, Ctx>
 where
     Pk: MiniscriptKey,
+    Ctx: ScriptContext,
     <Pk as str::FromStr>::Err: ToString,
     <<Pk as MiniscriptKey>::Hash as str::FromStr>::Err: ToString,
 {
     type Err = Error;
 
-    fn from_str(s: &str) -> Result<Miniscript<Pk>, Error> {
+    fn from_str(s: &str) -> Result<Miniscript<Pk, Ctx>, Error> {
         for ch in s.as_bytes() {
             if *ch < 20 || *ch > 127 {
                 return Err(Error::Unprintable(*ch));
@@ -273,7 +295,7 @@ where
         }
 
         let top = expression::Tree::from_str(s)?;
-        let ms: Miniscript<Pk> = expression::FromTree::from_tree(&top)?;
+        let ms: Miniscript<Pk, Ctx> = expression::FromTree::from_tree(&top)?;
 
         if ms.ty.corr.base != types::Base::B {
             Err(Error::NonTopLevel(format!("{:?}", ms)))
@@ -283,68 +305,17 @@ where
     }
 }
 
-#[cfg(feature = "serde")]
-impl<Pk: MiniscriptKey> ser::Serialize for Miniscript<Pk> {
-    fn serialize<S: ser::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.collect_str(self)
-    }
-}
-
-#[cfg(feature = "serde")]
-impl<'de, Pk> de::Deserialize<'de> for Miniscript<Pk>
-where
-    Pk: MiniscriptKey,
-    <Pk as str::FromStr>::Err: ToString,
-    <<Pk as MiniscriptKey>::Hash as str::FromStr>::Err: ToString,
-{
-    fn deserialize<D: de::Deserializer<'de>>(d: D) -> Result<Miniscript<Pk>, D::Error> {
-        use std::marker::PhantomData;
-        use std::str::FromStr;
-
-        struct StrVisitor<Qk>(PhantomData<(Qk)>);
-
-        impl<'de, Qk> de::Visitor<'de> for StrVisitor<Qk>
-        where
-            Qk: MiniscriptKey,
-            <Qk as str::FromStr>::Err: ToString,
-            <<Qk as MiniscriptKey>::Hash as str::FromStr>::Err: ToString,
-        {
-            type Value = Miniscript<Qk>;
-
-            fn expecting(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-                fmt.write_str("an ASCII miniscript string")
-            }
-
-            fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                if let Ok(s) = str::from_utf8(v) {
-                    Miniscript::from_str(s).map_err(E::custom)
-                } else {
-                    return Err(E::invalid_value(de::Unexpected::Bytes(v), &self));
-                }
-            }
-
-            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                Miniscript::from_str(v).map_err(E::custom)
-            }
-        }
-
-        d.deserialize_str(StrVisitor(PhantomData))
-    }
-}
+serde_string_impl_pk!(Miniscript, "a miniscript", Ctx; ScriptContext);
 
 #[cfg(test)]
 mod tests {
-    use super::Miniscript;
+    use super::Segwitv0;
+    use super::{Miniscript, ScriptContext};
     use hex_script;
-    use miniscript::decode::Terminal;
     use miniscript::types::{self, ExtData, Property, Type};
+    use miniscript::Terminal;
     use policy::Liftable;
+    use std::marker::PhantomData;
     use DummyKey;
     use DummyKeyHash;
 
@@ -355,7 +326,7 @@ mod tests {
     use std::sync::Arc;
     use MiniscriptKey;
 
-    type BScript = Miniscript<bitcoin::PublicKey>;
+    type Segwitv0Script = Miniscript<bitcoin::PublicKey, Segwitv0>;
 
     fn pubkeys(n: usize) -> Vec<bitcoin::PublicKey> {
         let mut ret = Vec::with_capacity(n);
@@ -378,12 +349,13 @@ mod tests {
         ret
     }
 
-    fn string_rtt<Pk, Str1, Str2>(
-        script: Miniscript<Pk>,
+    fn string_rtt<Pk, Ctx, Str1, Str2>(
+        script: Miniscript<Pk, Ctx>,
         expected_debug: Str1,
         expected_display: Str2,
     ) where
         Pk: MiniscriptKey,
+        Ctx: ScriptContext,
         <Pk as str::FromStr>::Err: ToString,
         <<Pk as MiniscriptKey>::Hash as str::FromStr>::Err: ToString,
         Str1: Into<Option<&'static str>>,
@@ -406,23 +378,23 @@ mod tests {
         assert_eq!(translated, Ok(script));
     }
 
-    fn script_rtt<Str1: Into<Option<&'static str>>>(script: BScript, expected_hex: Str1) {
+    fn script_rtt<Str1: Into<Option<&'static str>>>(script: Segwitv0Script, expected_hex: Str1) {
         assert_eq!(script.ty.corr.base, types::Base::B);
         let bitcoin_script = script.encode();
         assert_eq!(bitcoin_script.len(), script.script_size());
         if let Some(expected) = expected_hex.into() {
             assert_eq!(format!("{:x}", bitcoin_script), expected);
         }
-        let roundtrip = Miniscript::parse(&bitcoin_script).expect("parse string serialization");
+        let roundtrip = Segwitv0Script::parse(&bitcoin_script).expect("parse string serialization");
         assert_eq!(roundtrip, script);
     }
 
-    fn roundtrip(tree: &Miniscript<bitcoin::PublicKey>, s: &str) {
+    fn roundtrip(tree: &Segwitv0Script, s: &str) {
         assert_eq!(tree.ty.corr.base, types::Base::B);
         let ser = tree.encode();
         assert_eq!(ser.len(), tree.script_size());
         assert_eq!(ser.to_string(), s);
-        let deser = Miniscript::parse(&ser).expect("deserialize result of serialize");
+        let deser = Segwitv0Script::parse(&ser).expect("deserialize result of serialize");
         assert_eq!(*tree, deser);
     }
 
@@ -435,7 +407,7 @@ mod tests {
         ops: usize,
         _stack: usize,
     ) {
-        let ms: Result<Miniscript<bitcoin::PublicKey>, _> = Miniscript::from_str(ms);
+        let ms: Result<Segwitv0Script, _> = Miniscript::from_str(ms);
         match (ms, valid) {
             (Ok(ms), true) => {
                 assert_eq!(format!("{:x}", ms.encode()), expected_hex);
@@ -507,40 +479,42 @@ mod tests {
         .unwrap();
         let hash = hash160::Hash::from_inner([17; 20]);
 
-        let pkk_ms: Miniscript<DummyKey> = Miniscript {
+        let pkk_ms: Miniscript<DummyKey, Segwitv0> = Miniscript {
             node: Terminal::Check(Arc::new(Miniscript {
                 node: Terminal::PkK(DummyKey),
                 ty: Type::from_pk_k(),
                 ext: types::extra_props::ExtData::from_pk_k(),
+                phantom: PhantomData,
             })),
             ty: Type::cast_check(Type::from_pk_k()).unwrap(),
             ext: ExtData::cast_check(ExtData::from_pk_k()).unwrap(),
+            phantom: PhantomData,
         };
         string_rtt(pkk_ms, "[B/onduesm]c:[K/onduesm]pk_k(DummyKey)", "pk()");
 
-        let pkh_ms: Miniscript<DummyKey> = Miniscript {
+        let pkh_ms: Miniscript<DummyKey, Segwitv0> = Miniscript {
             node: Terminal::Check(Arc::new(Miniscript {
                 node: Terminal::PkH(DummyKeyHash),
                 ty: Type::from_pk_h(),
                 ext: types::extra_props::ExtData::from_pk_h(),
+                phantom: PhantomData,
             })),
             ty: Type::cast_check(Type::from_pk_h()).unwrap(),
             ext: ExtData::cast_check(ExtData::from_pk_h()).unwrap(),
+            phantom: PhantomData,
         };
-        string_rtt(
-            pkh_ms,
-            "[B/nduesm]c:[K/nduesm]pk_h(DummyKeyHash)",
-            "c:pk_h()",
-        );
+        string_rtt(pkh_ms, "[B/nduesm]c:[K/nduesm]pk_h(DummyKeyHash)", "pkh()");
 
-        let pkk_ms: Miniscript<bitcoin::PublicKey> = Miniscript {
+        let pkk_ms: Segwitv0Script = Miniscript {
             node: Terminal::Check(Arc::new(Miniscript {
                 node: Terminal::PkK(pk),
                 ty: Type::from_pk_k(),
                 ext: types::extra_props::ExtData::from_pk_k(),
+                phantom: PhantomData,
             })),
             ty: Type::cast_check(Type::from_pk_k()).unwrap(),
             ext: ExtData::cast_check(ExtData::from_pk_k()).unwrap(),
+            phantom: PhantomData,
         };
 
         script_rtt(
@@ -549,14 +523,16 @@ mod tests {
              202020202ac",
         );
 
-        let pkh_ms: Miniscript<bitcoin::PublicKey> = Miniscript {
+        let pkh_ms: Segwitv0Script = Miniscript {
             node: Terminal::Check(Arc::new(Miniscript {
                 node: Terminal::PkH(hash),
                 ty: Type::from_pk_h(),
                 ext: types::extra_props::ExtData::from_pk_h(),
+                phantom: PhantomData,
             })),
             ty: Type::cast_check(Type::from_pk_h()).unwrap(),
             ext: ExtData::cast_check(ExtData::from_pk_h()).unwrap(),
+            phantom: PhantomData,
         };
 
         script_rtt(pkh_ms, "76a914111111111111111111111111111111111111111188ac");
@@ -575,28 +551,62 @@ mod tests {
             "Script(OP_0 OP_NOTIF OP_0 OP_ELSE OP_PUSHNUM_1 OP_ENDIF)",
         );
 
-        assert!(Miniscript::<bitcoin::PublicKey>::from_str("1()").is_err());
-        assert!(Miniscript::<bitcoin::PublicKey>::from_str("tv:1()").is_err());
+        assert!(Segwitv0Script::from_str("1()").is_err());
+        assert!(Segwitv0Script::from_str("tv:1()").is_err());
     }
 
     #[test]
     fn pk_alias() {
         let pubkey = pubkeys(1)[0];
 
-        let script: Miniscript<bitcoin::PublicKey> = ms_str!("c:pk_k({})", pubkey.to_string());
+        let script: Segwitv0Script = ms_str!("c:pk_k({})", pubkey.to_string());
 
         string_rtt(
             script,
-            "[B/onduesm]c:[K/onduesm]pk_k(PublicKey { compressed: true, key: PublicKey(aa4c32e50fb34a95a372940ae3654b692ea35294748c3dd2c08b29f87ba9288c8294efcb73dc719e45b91c45f084e77aebc07c1ff3ed8f37935130a36304a340) })", 
+            "[B/onduesm]c:[K/onduesm]pk_k(PublicKey { compressed: true, key: PublicKey(aa4c32e50fb34a95a372940ae3654b692ea35294748c3dd2c08b29f87ba9288c8294efcb73dc719e45b91c45f084e77aebc07c1ff3ed8f37935130a36304a340) })",
             "pk(028c28a97bf8298bc0d23d8c749452a32e694b65e30a9472a3954ab30fe5324caa)"
         );
 
-        let script: Miniscript<bitcoin::PublicKey> = ms_str!("pk({})", pubkey.to_string());
+        let script: Segwitv0Script = ms_str!("pk({})", pubkey.to_string());
 
         string_rtt(
             script,
-            "[B/onduesm]c:[K/onduesm]pk_k(PublicKey { compressed: true, key: PublicKey(aa4c32e50fb34a95a372940ae3654b692ea35294748c3dd2c08b29f87ba9288c8294efcb73dc719e45b91c45f084e77aebc07c1ff3ed8f37935130a36304a340) })", 
+            "[B/onduesm]c:[K/onduesm]pk_k(PublicKey { compressed: true, key: PublicKey(aa4c32e50fb34a95a372940ae3654b692ea35294748c3dd2c08b29f87ba9288c8294efcb73dc719e45b91c45f084e77aebc07c1ff3ed8f37935130a36304a340) })",
             "pk(028c28a97bf8298bc0d23d8c749452a32e694b65e30a9472a3954ab30fe5324caa)"
+        );
+
+        let script: Segwitv0Script = ms_str!("tv:pk({})", pubkey.to_string());
+
+        string_rtt(
+            script,
+            "[B/onufsm]t[V/onfsm]v[B/onduesm]c:[K/onduesm]pk_k(PublicKey { compressed: true, key: PublicKey(aa4c32e50fb34a95a372940ae3654b692ea35294748c3dd2c08b29f87ba9288c8294efcb73dc719e45b91c45f084e77aebc07c1ff3ed8f37935130a36304a340) })",
+            "tv:pk(028c28a97bf8298bc0d23d8c749452a32e694b65e30a9472a3954ab30fe5324caa)"
+        );
+
+        let pubkey_hash =
+            hash160::Hash::from_str("f54a5851e9372b87810a8e60cdd2e7cfd80b6e31").unwrap();
+        let script: Segwitv0Script = ms_str!("c:pk_h({})", pubkey_hash.to_string());
+
+        string_rtt(
+            script,
+            "[B/nduesm]c:[K/nduesm]pk_h(f54a5851e9372b87810a8e60cdd2e7cfd80b6e31)",
+            "pkh(f54a5851e9372b87810a8e60cdd2e7cfd80b6e31)",
+        );
+
+        let script: Segwitv0Script = ms_str!("pkh({})", pubkey_hash.to_string());
+
+        string_rtt(
+            script,
+            "[B/nduesm]c:[K/nduesm]pk_h(f54a5851e9372b87810a8e60cdd2e7cfd80b6e31)",
+            "pkh(f54a5851e9372b87810a8e60cdd2e7cfd80b6e31)",
+        );
+
+        let script: Segwitv0Script = ms_str!("tv:pkh({})", pubkey_hash.to_string());
+
+        string_rtt(
+            script,
+            "[B/nufsm]t[V/nfsm]v[B/nduesm]c:[K/nduesm]pk_h(f54a5851e9372b87810a8e60cdd2e7cfd80b6e31)",
+            "tv:pkh(f54a5851e9372b87810a8e60cdd2e7cfd80b6e31)",
         );
     }
 
@@ -641,7 +651,7 @@ mod tests {
                      OP_ENDIF)"
         );
 
-        let miniscript: Miniscript<bitcoin::PublicKey> = ms_str!(
+        let miniscript: Segwitv0Script = ms_str!(
             "or_d(multi(3,{},{},{}),and_v(v:multi(2,{},{}),older(10000)))",
             keys[0].to_string(),
             keys[1].to_string(),
@@ -687,26 +697,69 @@ mod tests {
              OP_PUSHBYTES_33 0289637f97580a796e050791ad5a2f27af1803645d95df021a3c2d82eb8c2ca7ff \
              OP_PUSHNUM_5 OP_CHECKMULTISIG)",
         );
+
+        roundtrip(
+            &ms_str!(
+                "t:and_v(\
+                     vu:hash256(131772552c01444cd81360818376a040b7c3b2b7b0a53550ee3edde216cec61b),\
+                     v:sha256(ec4916dd28fc4c10d78e287ca5d9cc51ee1ae73cbfde08c6b37324cbfaac8bc5)\
+                 )"),
+            "Script(OP_IF OP_SIZE OP_PUSHBYTES_1 20 OP_EQUALVERIFY OP_HASH256 OP_PUSHBYTES_32 131772552c01444cd81360818376a040b7c3b2b7b0a53550ee3edde216cec61b OP_EQUAL OP_ELSE OP_0 OP_ENDIF OP_VERIFY OP_SIZE OP_PUSHBYTES_1 20 OP_EQUALVERIFY OP_SHA256 OP_PUSHBYTES_32 ec4916dd28fc4c10d78e287ca5d9cc51ee1ae73cbfde08c6b37324cbfaac8bc5 OP_EQUALVERIFY OP_PUSHNUM_1)"
+        );
+        roundtrip(
+            &ms_str!("and_n(pk(03daed4f2be3a8bf278e70132fb0beb7522f570e144bf615c07e996d443dee8729),and_b(l:older(4252898),a:older(16)))"),
+            "Script(OP_PUSHBYTES_33 03daed4f2be3a8bf278e70132fb0beb7522f570e144bf615c07e996d443dee8729 OP_CHECKSIG OP_NOTIF OP_0 OP_ELSE OP_IF OP_0 OP_ELSE OP_PUSHBYTES_3 e2e440 OP_CSV OP_ENDIF OP_TOALTSTACK OP_PUSHNUM_16 OP_CSV OP_FROMALTSTACK OP_BOOLAND OP_ENDIF)"
+        );
+        roundtrip(
+            &ms_str!(
+                "t:andor(multi(\
+                    3,\
+                    02d7924d4f7d43ea965a465ae3095ff41131e5946f3c85f79e44adbcf8e27e080e,\
+                    03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556,\
+                    02e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd13\
+                 ),\
+                 v:older(4194305),\
+                 v:sha256(9267d3dbed802941483f1afa2a6bc68de5f653128aca9bf1461c5d0a3ad36ed2)\
+                 )"),
+            "Script(OP_PUSHNUM_3 OP_PUSHBYTES_33 02d7924d4f7d43ea965a465ae3095ff41131e5946f3c85f79e44adbcf8e27e080e \
+             OP_PUSHBYTES_33 03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556 \
+             OP_PUSHBYTES_33 02e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd13 \
+             OP_PUSHNUM_3 OP_CHECKMULTISIG OP_NOTIF OP_SIZE OP_PUSHBYTES_1 20 OP_EQUALVERIFY OP_SHA256 \
+             OP_PUSHBYTES_32 9267d3dbed802941483f1afa2a6bc68de5f653128aca9bf1461c5d0a3ad36ed2 OP_EQUALVERIFY \
+             OP_ELSE OP_PUSHBYTES_3 010040 OP_CSV OP_VERIFY OP_ENDIF OP_PUSHNUM_1)"
+        );
+        roundtrip(
+            &ms_str!(
+                "t:and_v(\
+                    vu:hash256(131772552c01444cd81360818376a040b7c3b2b7b0a53550ee3edde216cec61b),\
+                    v:sha256(ec4916dd28fc4c10d78e287ca5d9cc51ee1ae73cbfde08c6b37324cbfaac8bc5)\
+                 )"),
+            "Script(\
+             OP_IF OP_SIZE OP_PUSHBYTES_1 20 OP_EQUALVERIFY OP_HASH256 OP_PUSHBYTES_32 131772552c01444cd81360818376a040b7c3b2b7b0a53550ee3edde216cec61b OP_EQUAL \
+             OP_ELSE OP_0 OP_ENDIF OP_VERIFY OP_SIZE OP_PUSHBYTES_1 20 OP_EQUALVERIFY OP_SHA256 OP_PUSHBYTES_32 ec4916dd28fc4c10d78e287ca5d9cc51ee1ae73cbfde08c6b37324cbfaac8bc5 OP_EQUALVERIFY \
+             OP_PUSHNUM_1\
+             )"
+        );
     }
 
     #[test]
     fn deserialize() {
         // Most of these came from fuzzing, hence the increasing lengths
-        assert!(Miniscript::parse(&hex_script("")).is_err()); // empty
-        assert!(Miniscript::parse(&hex_script("00")).is_ok()); // FALSE
-        assert!(Miniscript::parse(&hex_script("51")).is_ok()); // TRUE
-        assert!(Miniscript::parse(&hex_script("69")).is_err()); // VERIFY
-        assert!(Miniscript::parse(&hex_script("0000")).is_err()); //and_v(FALSE,FALSE)
-        assert!(Miniscript::parse(&hex_script("1001")).is_err()); // incomplete push
-        assert!(Miniscript::parse(&hex_script("03990300b2")).is_err()); // non-minimal #
-        assert!(Miniscript::parse(&hex_script("8559b2")).is_err()); // leading bytes
-        assert!(Miniscript::parse(&hex_script("4c0169b2")).is_err()); // non-minimal push
-        assert!(Miniscript::parse(&hex_script("0000af0000ae85")).is_err()); // OR not BOOLOR
+        assert!(Segwitv0Script::parse(&hex_script("")).is_err()); // empty
+        assert!(Segwitv0Script::parse(&hex_script("00")).is_ok()); // FALSE
+        assert!(Segwitv0Script::parse(&hex_script("51")).is_ok()); // TRUE
+        assert!(Segwitv0Script::parse(&hex_script("69")).is_err()); // VERIFY
+        assert!(Segwitv0Script::parse(&hex_script("0000")).is_err()); //and_v(FALSE,FALSE)
+        assert!(Segwitv0Script::parse(&hex_script("1001")).is_err()); // incomplete push
+        assert!(Segwitv0Script::parse(&hex_script("03990300b2")).is_err()); // non-minimal #
+        assert!(Segwitv0Script::parse(&hex_script("8559b2")).is_err()); // leading bytes
+        assert!(Segwitv0Script::parse(&hex_script("4c0169b2")).is_err()); // non-minimal push
+        assert!(Segwitv0Script::parse(&hex_script("0000af0000ae85")).is_err()); // OR not BOOLOR
 
         // misc fuzzer problems
-        assert!(Miniscript::parse(&hex_script("0000000000af")).is_err());
-        assert!(Miniscript::parse(&hex_script("04009a2970af00")).is_err()); // giant CMS key num
-        assert!(Miniscript::parse(&hex_script(
+        assert!(Segwitv0Script::parse(&hex_script("0000000000af")).is_err());
+        assert!(Segwitv0Script::parse(&hex_script("04009a2970af00")).is_err()); // giant CMS key num
+        assert!(Segwitv0Script::parse(&hex_script(
             "2102ffffffffffffffefefefefefefefefefefef394c0fe5b711179e124008584753ac6900"
         ))
         .is_err());

@@ -14,44 +14,44 @@
 
 use super::decode::Terminal;
 use super::Error;
-use super::{Miniscript, MiniscriptKey};
+use super::{Miniscript, MiniscriptKey, ScriptContext};
 use std::collections::VecDeque;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 
 /// Iterator-related extensions for [Miniscript]
-impl<PK: MiniscriptKey> Miniscript<PK> {
+impl<PK: MiniscriptKey, Ctx: ScriptContext> Miniscript<PK, Ctx> {
     /// Creates a new [Iter] iterator that will iterate over all [Miniscript] items within
     /// AST by traversing its branches. For the specific algorithm please see
     /// [Iter::next] function.
-    pub fn iter(&self) -> Iter<PK> {
+    pub fn iter(&self) -> Iter<PK, Ctx> {
         Iter::new(self)
     }
 
     /// Creates a new [PubkeyIter] iterator that will iterate over all plain public keys (and not
     /// key hash values) present in [Miniscript] items within AST by traversing all its branches.
     /// For the specific algorithm please see [PubkeyIter::next] function.
-    pub fn iter_pubkeys(&self) -> PubkeyIter<PK> {
+    pub fn iter_pubkeys(&self) -> PubkeyIter<PK, Ctx> {
         PubkeyIter::new(self)
     }
 
     /// Creates a new [PubkeyHashIter] iterator that will iterate over all plain public keys (and not
     /// key hash values) present in Miniscript items within AST by traversing all its branches.
     /// For the specific algorithm please see [PubkeyHashIter::next] function.
-    pub fn iter_pubkey_hashes(&self) -> PubkeyHashIter<PK> {
+    pub fn iter_pubkey_hashes(&self) -> PubkeyHashIter<PK, Ctx> {
         PubkeyHashIter::new(self)
     }
 
     /// Creates a new [PubkeyAndHashIter] iterator that will iterate over all plain public keys and
     /// key hash values present in Miniscript items within AST by traversing all its branches.
     /// For the specific algorithm please see [PubeyAndHashIter::next] function.
-    pub fn iter_pubkeys_and_hashes(&self) -> PubkeyAndHashIter<PK> {
+    pub fn iter_pubkeys_and_hashes(&self) -> PubkeyAndHashIter<PK, Ctx> {
         PubkeyAndHashIter::new(self)
     }
 
     /// Enumerates all child nodes of the current AST node (`self`) and returns a `Vec` referencing
     /// them.
-    pub fn branches(&self) -> Vec<&Miniscript<PK>> {
+    pub fn branches(&self) -> Vec<&Miniscript<PK, Ctx>> {
         use Terminal::*;
         match &self.node {
             PkK(_) | PkH(_) | Multi(_, _) => vec![],
@@ -193,8 +193,8 @@ impl<PK: MiniscriptKey> Miniscript<PK> {
                 *count,
                 node_vec
                     .into_iter()
-                    .try_fold::<_, _, Result<Vec<Arc<Miniscript<PK>>>, Error>>(
-                        Vec::<Arc<Miniscript<PK>>>::new(),
+                    .try_fold::<_, _, Result<Vec<Arc<Miniscript<PK, Ctx>>>, Error>>(
+                        Vec::<Arc<Miniscript<PK, Ctx>>>::new(),
                         |mut vec, ms| {
                             vec.push(process![ms]);
                             Ok(vec)
@@ -210,13 +210,13 @@ impl<PK: MiniscriptKey> Miniscript<PK> {
 
 /// Iterator for traversing all [Miniscript] miniscript AST references starting from some specific
 /// node which constructs the iterator via [Miniscript::iter] method.
-pub struct Iter<'a, Pk: 'a + MiniscriptKey> {
-    next: Option<&'a Miniscript<Pk>>,
-    path: Vec<(&'a Miniscript<Pk>, usize)>,
+pub struct Iter<'a, Pk: 'a + MiniscriptKey, Ctx: ScriptContext> {
+    next: Option<&'a Miniscript<Pk, Ctx>>,
+    path: Vec<(&'a Miniscript<Pk, Ctx>, usize)>,
 }
 
-impl<'a, Pk: MiniscriptKey> Iter<'a, Pk> {
-    fn new(miniscript: &'a Miniscript<Pk>) -> Self {
+impl<'a, Pk: MiniscriptKey, Ctx: ScriptContext> Iter<'a, Pk, Ctx> {
+    fn new(miniscript: &'a Miniscript<Pk, Ctx>) -> Self {
         Iter {
             next: Some(miniscript),
             path: vec![],
@@ -224,8 +224,8 @@ impl<'a, Pk: MiniscriptKey> Iter<'a, Pk> {
     }
 }
 
-impl<'a, Pk: MiniscriptKey> Iterator for Iter<'a, Pk> {
-    type Item = &'a Miniscript<Pk>;
+impl<'a, Pk: MiniscriptKey, Ctx: ScriptContext> Iterator for Iter<'a, Pk, Ctx> {
+    type Item = &'a Miniscript<Pk, Ctx>;
 
     /// First, the function returns `self`, then the first child of the self (if any),
     /// then proceeds to the child of the child — down to a leaf of the tree in its first branch.
@@ -269,13 +269,13 @@ impl<'a, Pk: MiniscriptKey> Iterator for Iter<'a, Pk> {
 
 /// Iterator for traversing all [MiniscriptKey]'s in AST starting from some specific node which
 /// constructs the iterator via [Miniscript::iter_pubkeys] method.
-pub struct PubkeyIter<'a, Pk: 'a + MiniscriptKey> {
-    node_iter: Iter<'a, Pk>,
+pub struct PubkeyIter<'a, Pk: 'a + MiniscriptKey, Ctx: ScriptContext> {
+    node_iter: Iter<'a, Pk, Ctx>,
     keys_buff: VecDeque<Pk>,
 }
 
-impl<'a, Pk: MiniscriptKey> PubkeyIter<'a, Pk> {
-    fn new(miniscript: &'a Miniscript<Pk>) -> Self {
+impl<'a, Pk: MiniscriptKey, Ctx: ScriptContext> PubkeyIter<'a, Pk, Ctx> {
+    fn new(miniscript: &'a Miniscript<Pk, Ctx>) -> Self {
         PubkeyIter {
             node_iter: Iter::new(miniscript),
             keys_buff: VecDeque::new(),
@@ -283,7 +283,7 @@ impl<'a, Pk: MiniscriptKey> PubkeyIter<'a, Pk> {
     }
 }
 
-impl<'a, Pk: MiniscriptKey> Iterator for PubkeyIter<'a, Pk> {
+impl<'a, Pk: MiniscriptKey, Ctx: ScriptContext> Iterator for PubkeyIter<'a, Pk, Ctx> {
     type Item = Pk;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -301,13 +301,13 @@ impl<'a, Pk: MiniscriptKey> Iterator for PubkeyIter<'a, Pk> {
 
 /// Iterator for traversing all [MiniscriptKey] hashes in AST starting from some specific node which
 /// constructs the iterator via [Miniscript::iter_pubkey_hashes] method.
-pub struct PubkeyHashIter<'a, Pk: 'a + MiniscriptKey> {
-    node_iter: Iter<'a, Pk>,
+pub struct PubkeyHashIter<'a, Pk: 'a + MiniscriptKey, Ctx: ScriptContext> {
+    node_iter: Iter<'a, Pk, Ctx>,
     keyhashes_buff: VecDeque<Pk::Hash>,
 }
 
-impl<'a, Pk: MiniscriptKey> PubkeyHashIter<'a, Pk> {
-    fn new(miniscript: &'a Miniscript<Pk>) -> Self {
+impl<'a, Pk: MiniscriptKey, Ctx: ScriptContext> PubkeyHashIter<'a, Pk, Ctx> {
+    fn new(miniscript: &'a Miniscript<Pk, Ctx>) -> Self {
         PubkeyHashIter {
             node_iter: Iter::new(miniscript),
             keyhashes_buff: VecDeque::new(),
@@ -315,7 +315,7 @@ impl<'a, Pk: MiniscriptKey> PubkeyHashIter<'a, Pk> {
     }
 }
 
-impl<'a, Pk: MiniscriptKey> Iterator for PubkeyHashIter<'a, Pk> {
+impl<'a, Pk: MiniscriptKey, Ctx: ScriptContext> Iterator for PubkeyHashIter<'a, Pk, Ctx> {
     type Item = Pk::Hash;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -343,13 +343,13 @@ pub enum PubkeyOrHash<Pk: MiniscriptKey> {
 /// Iterator for traversing all [MiniscriptKey]'s and hashes, depending what data are present in AST,
 /// starting from some specific node which constructs the iterator via
 /// [Miniscript::iter_keys_and_hashes] method.
-pub struct PubkeyAndHashIter<'a, Pk: 'a + MiniscriptKey> {
-    node_iter: Iter<'a, Pk>,
+pub struct PubkeyAndHashIter<'a, Pk: 'a + MiniscriptKey, Ctx: ScriptContext> {
+    node_iter: Iter<'a, Pk, Ctx>,
     buff: VecDeque<PubkeyOrHash<Pk>>,
 }
 
-impl<'a, Pk: MiniscriptKey> PubkeyAndHashIter<'a, Pk> {
-    fn new(miniscript: &'a Miniscript<Pk>) -> Self {
+impl<'a, Pk: MiniscriptKey, Ctx: ScriptContext> PubkeyAndHashIter<'a, Pk, Ctx> {
+    fn new(miniscript: &'a Miniscript<Pk, Ctx>) -> Self {
         PubkeyAndHashIter {
             node_iter: Iter::new(miniscript),
             buff: VecDeque::new(),
@@ -378,7 +378,7 @@ impl<'a, Pk: MiniscriptKey> PubkeyAndHashIter<'a, Pk> {
     }
 }
 
-impl<'a, Pk: MiniscriptKey> Iterator for PubkeyAndHashIter<'a, Pk> {
+impl<'a, Pk: MiniscriptKey, Ctx: ScriptContext> Iterator for PubkeyAndHashIter<'a, Pk, Ctx> {
     type Item = PubkeyOrHash<Pk>;
 
     fn next(&mut self) -> Option<Self::Item> {

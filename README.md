@@ -2,6 +2,9 @@
 
 **Minimum Supported Rust Version:** 1.22.0
 
+*This crate uses "2015" edition and won't be ported over "2018" edition
+in the near future as this will change the MSRV to 1.31.*
+
 # Miniscript
 
 Library for handling [Miniscript](http://bitcoin.sipa.be/miniscript/),
@@ -49,3 +52,6 @@ active development and is not held to the same standards as `rust-bitcoin` or
 For this reason, it is not recommended to use it in production.
 
 
+# Release Notes
+
+See [CHANGELOG.md](CHANGELOG.md).
